@@ -4,6 +4,9 @@ Webサイト監視＆LINE通知プログラム（同期版・シンプル）
 特定の要素が出現したらスクリーンショットを撮影してLINEに通知
 """
 
+from datetime import datetime
+import json
+import requests
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,6 +16,7 @@ import os
 import tempfile
 from dotenv import load_dotenv
 from pathlib import Path
+import random
 
 
 # 環境変数の読み込み
@@ -34,6 +38,36 @@ TIMEOUT = 30000      # ミリ秒単位のタイムアウト
 
 # ブラウザ設定
 BROWSER_HEADLESS = True  # False にするとブラウザが表示される（デバッグ用）
+
+LINE_CHANNEL_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+def send_stock_notification(message):
+    """
+    友だち登録者全員に在庫通知を送信
+    """
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {LINE_CHANNEL_TOKEN}'
+    }
+    
+    data = {
+        'messages': [
+            {
+                'type': 'text',
+                'text': message
+            }
+        ]
+    }
+    
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    
+    if response.status_code == 200:
+        print("✅ LINE通知送信成功")
+    else:
+        print(f"❌ エラー: {response.text}")
+    
+    return response.status_code == 200
 
 
 def send_line_notification(message, image_path=None):
@@ -169,23 +203,90 @@ def monitor_website():
         #あらかじめカートに入れられる場合
         cart_element.click()
 
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((
+        found_available = False
+
+        while not found_available:
+            print('ループ開始')
+
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((
+                    By.XPATH,
+                    "//div[starts-with(@class, 'product_checkbox') and not(contains(@class, 'Disabled'))]"
+                ))
+            )
+
+            checkboxes = driver.find_elements(
                 By.XPATH,
-                "//div[starts-with(@class, 'product_checkbox') and not(contains(@class, 'Disabled'))]"
-            ))
-        )
+                "//div[starts-with(@class, 'product_checkbox') and not(contains(@class, 'Disabled')) and not(contains(@class, 'Container')) and not(*)]"
+            )
 
-        checkboxes = driver.find_elements(
-            By.XPATH,
-            "//div[starts-with(@class, 'product_checkbox') and not(contains(@class, 'Disabled'))]"
-        )
+            if len(checkboxes) > 0:
+                print(f"✅ {len(checkboxes)}個の有効なチェックボックスを発見！")
+                found_available = True
 
-        for checkbox in checkboxes:
-            try:
-                checkbox.click()
-            except:
-                continue
+                # 商品名を取得（有効な商品のみ）
+                product_names = []
+                try:
+                    # すべての商品コンテナを取得
+                    product_containers = driver.find_elements(
+                        By.XPATH,
+                        "//div[contains(@class, 'product_checkboxContainer')]"
+                    )
+                    
+                    for container in product_containers:
+                        # 有効なチェックボックスを持つコンテナのみ処理
+                        checkbox = container.find_elements(
+                            By.XPATH,
+                            ".//div[starts-with(@class, 'product_checkbox__')]"
+                        )
+                        
+                        if checkbox:  # 有効なチェックボックスがある場合
+                            # 隣接する商品名を取得
+                            try:
+                                product_name = container.find_element(
+                                    By.XPATH,
+                                    "following-sibling::div//div[contains(@class, 'product_productName')]"
+                                ).text
+                                product_names.append(product_name)
+                            except:
+                                pass
+                                
+                except Exception as e:
+                    print(f"商品名取得エラー: {e}")
+
+                # # スクリーンショット
+                # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # screenshot_path = f"screenshots/stock_found_{timestamp}.png"
+
+                # LINE通知メッセージ作成
+                message = f"""
+                🎯 POP MART 在庫復活！
+                
+                ✅ 購入可能商品: {len(checkboxes)}個
+                
+                📦 商品リスト:
+                {chr(10).join(['・' + name for name in product_names]) if product_names else '商品名取得失敗'}
+                
+                🕐 {datetime.now().strftime("%Y/%m/%d %H:%M:%S")}
+                🛒 自動購入処理を開始...
+                """
+                
+                # 通知送信
+                send_stock_notification(message)
+                
+                # チェックボックスをクリック
+                for checkbox in checkboxes:
+                    try:
+                        checkbox.click()
+                        time.sleep(0.3)
+                    except:
+                        continue
+                
+                break
+            
+            if not found_available:
+                time.sleep(random.uniform(0.4, 0.7))
+                driver.refresh()
         
         checkout_button = driver.find_element(
             By.XPATH,
